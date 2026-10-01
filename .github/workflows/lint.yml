@@ -1,0 +1,9 @@
+name: lint
+on: pull_request
+jobs:
+  cfn-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install cfn-lint
+      - run: cfn-lint "projects/**/*.yaml" "bootstrap/*.yaml"

@@ -1,0 +1,50 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: One-time bootstrap - GitHub OIDC provider and the role used by the cloudformation-ops repo
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: Your GitHub username or organisation
+  OpsRepo:
+    Type: String
+    Default: cloudformation-ops
+  OpsBranch:
+    Type: String
+    Default: main
+
+Resources:
+  # Only ONE of these can exist per AWS account
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+
+  OpsDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cloudformation-ops-github-deploy
+      # Trust policy = WHO may use this role:
+      # only GitHub Actions running in THIS repo on THIS branch
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                'token.actions.githubusercontent.com:sub': !Sub 'repo:${GitHubOrg}/${OpsRepo}:ref:refs/heads/${OpsBranch}'
+      # Permissions: admin, because our stacks create IAM roles, VPCs, etc.
+      # The trust policy above is what keeps this safe.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+Outputs:
+  OpsDeployRoleArn:
+    Description: Used in step A10 as the GitHub secret AWS_ROLE_ARN of the infra repo
+    Value: !GetAtt OpsDeployRole.Arn

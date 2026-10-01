@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Elastic Beanstalk - one application, one environment, roles, S3 bucket
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvName:
+    Type: String
+  SolutionStackName:
+    Type: String
+    Description: From params/dev/app.params
+  InstanceType:
+    Type: String
+    Default: t3.micro
+
+Resources:
+  # ---------- S3 bucket where CI uploads app zips ----------
+  VersionsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${EnvName}-eb-versions-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ---------- IAM role 1: used by Elastic Beanstalk itself ----------
+  EbServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvName}-eb-service-role'
+      # Trust policy = WHO may use this role: the Elastic Beanstalk service
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: elasticbeanstalk.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'sts:ExternalId': elasticbeanstalk
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy
+
+  # ---------- IAM role 2: used by the EC2 server that runs our code ----------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvName}-eb-instance-role'
+      # Trust policy = WHO may use this role: EC2 servers
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier     # logs and platform basics
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore   # shell access without SSH keys
+      Policies:
+        - PolicyName: read-app-bundle
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${VersionsBucket.Arn}/*'
+
+  # Wrapper that lets an EC2 server use InstanceRole
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-${EnvName}-eb-instance-profile'
+      Roles:
+        - !Ref InstanceRole
+
+  # ---------- Beanstalk application and environment ----------
+  Application:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: !Sub '${ProjectName}-${EnvName}'
+
+  ApiEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref Application
+      EnvironmentName: !Sub '${ProjectName}-${EnvName}-api'
+      SolutionStackName: !Ref SolutionStackName
+      OptionSettings:
+        # One server, no load balancer (cheaper and simpler)
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: EnvironmentType, Value: SingleInstance }
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: ServiceRole, Value: !GetAtt EbServiceRole.Arn }
+        # Put the server inside OUR network from stack 01
+        - Namespace: 'aws:ec2:vpc'
+          OptionName: VPCId
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-VpcId' }
+        - Namespace: 'aws:ec2:vpc'
+          OptionName: Subnets
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-PublicSubnetId' }
+        - { Namespace: 'aws:ec2:vpc', OptionName: AssociatePublicIpAddress, Value: 'true' }
+        # The server: size, permissions, firewall group
+        - { Namespace: 'aws:ec2:instances', OptionName: InstanceTypes, Value: !Ref InstanceType }
+        - { Namespace: 'aws:autoscaling:launchconfiguration', OptionName: IamInstanceProfile, Value: !Ref InstanceProfile }
+        - Namespace: 'aws:autoscaling:launchconfiguration'
+          OptionName: SecurityGroups
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-AppSecurityGroupId' }
+        # Environment variables available to the Node.js app
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: PORT, Value: '8080' }
+
+Outputs:
+  ApiEnvironmentName:
+    Value: !Ref ApiEnvironment
+  VersionsBucket:                  # the bucket NAME, read by the app's deploy workflow
+    Value: !Ref VersionsBucket
+  VersionsBucketArn:               # the bucket ARN, imported by the cicd stack
+    Value: !GetAtt VersionsBucket.Arn
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-VersionsBucketArn' }
+  ApiUrl:
+    Value: !Sub 'http://${ApiEnvironment.EndpointURL}'

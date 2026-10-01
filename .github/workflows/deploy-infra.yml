@@ -1,0 +1,64 @@
+name: deploy-infra
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'projects/**'
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Folder under projects/ to deploy'
+        required: true
+        default: url-shortener
+
+permissions:
+  id-token: write   # passwordless AWS login (OIDC)
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  ENV_NAME: dev
+
+jobs:
+  # Job 1: find which project folders changed in this push
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.set.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            CHANGED="${{ inputs.project }}"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            CHANGED=$(git ls-files projects | cut -d/ -f2 | sort -u)   # first push: all projects
+          else
+            CHANGED=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- projects | cut -d/ -f2 | sort -u)
+          fi
+          JSON=$(printf '%s\n' "$CHANGED" | jq -R -s -c 'split("\n") | map(select(length>0))')
+          echo "Projects to deploy: $JSON"
+          echo "projects=$JSON" >> "$GITHUB_OUTPUT"
+
+  # Job 2: one job per changed project, running deploy-all.sh
+  deploy:
+    needs: detect
+    if: needs.detect.outputs.projects != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.detect.outputs.projects) }}
+    concurrency:
+      group: infra-${{ matrix.project }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}   # the OPS_ROLE_ARN from step A5
+          aws-region: ${{ env.AWS_REGION }}
+      - run: scripts/deploy-all.sh "${{ matrix.project }}" "${{ env.ENV_NAME }}"
