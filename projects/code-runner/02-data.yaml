@@ -9,10 +9,10 @@ Parameters:
   MqEngineVersion:
     Type: String
     Default: '3.13'
-    Description: "Check supported versions: aws mq describe-broker-engine-types --engine-type RABBITMQ"
+    Description: "Supported on mq.m7g.medium in ap-south-1: 4.3, 4.2, 3.13. Check: aws mq describe-broker-instance-options --engine-type RABBITMQ --host-instance-type mq.m7g.medium"
   MqInstanceType:
     Type: String
-    Default: mq.t3.micro
+    Default: mq.m7g.medium
   MqUsername:
     Type: String
     Default: coderunner
