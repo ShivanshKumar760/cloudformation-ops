@@ -2,12 +2,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: One-time bootstrap - GitHub OIDC provider and the role used by the cloudformation-ops repo
 
 Parameters:
-  GitHubOrg:
+  OpsRepoSubject:
     Type: String
-    Description: Your GitHub username or organisation
-  OpsRepo:
-    Type: String
-    Default: cloudformation-ops
+    Description: sub_claim_prefix of the ops repo, without the leading "repo:" (from gh api repos/OWNER/REPO/actions/oidc/customization/sub)
   OpsBranch:
     Type: String
     Default: main
@@ -38,7 +35,7 @@ Resources:
               StringEquals:
                 'token.actions.githubusercontent.com:aud': sts.amazonaws.com
               StringLike:
-                'token.actions.githubusercontent.com:sub': !Sub 'repo:${GitHubOrg}/${OpsRepo}:ref:refs/heads/${OpsBranch}'
+                'token.actions.githubusercontent.com:sub': !Sub 'repo:${OpsRepoSubject}:ref:refs/heads/${OpsBranch}'
       # Permissions: admin, because our stacks create IAM roles, VPCs, etc.
       # The trust policy above is what keeps this safe.
       ManagedPolicyArns:

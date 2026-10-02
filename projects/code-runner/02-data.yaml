@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Data layer - DynamoDB table, RabbitMQ password secret, Amazon MQ (RabbitMQ) broker
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvName:
+    Type: String
+  MqEngineVersion:
+    Type: String
+    Default: '3.13'
+    Description: "Check supported versions: aws mq describe-broker-engine-types --engine-type RABBITMQ"
+  MqInstanceType:
+    Type: String
+    Default: mq.t3.micro
+  MqUsername:
+    Type: String
+    Default: coderunner
+
+Resources:
+  # ---------- DynamoDB table ----------
+  SubmissionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-${EnvName}-submissions'
+      BillingMode: PAY_PER_REQUEST         # no capacity planning, pay per request
+      AttributeDefinitions:
+        - AttributeName: submissionId      # only KEY attributes are declared here
+          AttributeType: S
+      KeySchema:
+        - AttributeName: submissionId
+          KeyType: HASH                    # the partition key
+      TimeToLiveSpecification:
+        AttributeName: expiresAt           # written by db.js, rows auto-delete after 7 days
+        Enabled: true
+
+  # ---------- Generated RabbitMQ password (never written in Git) ----------
+  MqPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ProjectName}/${EnvName}/mq-password'
+      Description: RabbitMQ password used by the app
+      GenerateSecretString:
+        PasswordLength: 24
+        ExcludePunctuation: true           # letters and digits only
+
+  # ---------- RabbitMQ on Amazon MQ ----------
+  MqBroker:
+    Type: AWS::AmazonMQ::Broker
+    Properties:
+      BrokerName: !Sub '${ProjectName}-${EnvName}-mq'
+      EngineType: RABBITMQ
+      EngineVersion: !Ref MqEngineVersion
+      HostInstanceType: !Ref MqInstanceType
+      DeploymentMode: SINGLE_INSTANCE      # cheapest; use CLUSTER_MULTI_AZ for production
+      AutoMinorVersionUpgrade: true
+      PubliclyAccessible: false            # only reachable from inside our VPC
+      SubnetIds:
+        - !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-PrivateSubnetId' }
+      SecurityGroups:
+        - !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-MqSecurityGroupId' }
+      Users:
+        - Username: !Ref MqUsername
+          Password: !Sub '{{resolve:secretsmanager:${MqPasswordSecret}:SecretString}}'
+
+Outputs:
+  TableName:
+    Value: !Ref SubmissionsTable
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-TableName' }
+  TableArn:
+    Value: !GetAtt SubmissionsTable.Arn
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-TableArn' }
+  MqEndpoint:                              # amqps://b-xxxx.mq.<region>.amazonaws.com:5671
+    Value: !Select [0, !GetAtt MqBroker.AmqpEndpoints]
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-MqEndpoint' }
+  MqUsername:
+    Value: !Ref MqUsername
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-MqUsername' }
+  MqPasswordSecretArn:
+    Value: !Ref MqPasswordSecret
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-MqPasswordSecretArn' }

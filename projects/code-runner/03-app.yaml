@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Elastic Beanstalk - one application, an API environment and a worker environment
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvName:
+    Type: String
+  SolutionStackName:
+    Type: String
+    Description: From params/dev/app.params
+  ApiInstanceType:
+    Type: String
+    Default: t3.micro
+  WorkerInstanceType:
+    Type: String
+    Default: t3.small      # the worker runs Docker containers, so give it more RAM
+
+Resources:
+  # ---------- S3 bucket where CI uploads app zips ----------
+  VersionsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${EnvName}-eb-versions-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ---------- IAM role 1: used by Elastic Beanstalk itself ----------
+  EbServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvName}-eb-service-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: elasticbeanstalk.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'sts:ExternalId': elasticbeanstalk
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy
+
+  # ---------- IAM role 2: used by the EC2 servers that run our code ----------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvName}-eb-instance-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: app-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # NEW in Part B: use ONLY our table, ONLY the needed actions
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:DescribeTable]
+                Resource: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-TableArn' }
+              # NEW in Part B: read the RabbitMQ password
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-MqPasswordSecretArn' }
+              # Same as Part A: download the app zip
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${VersionsBucket.Arn}/*'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-${EnvName}-eb-instance-profile'
+      Roles:
+        - !Ref InstanceRole
+
+  # ---------- Beanstalk application ----------
+  Application:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: !Sub '${ProjectName}-${EnvName}'
+
+  # ---------- API environment (APP_ROLE=api) ----------
+  ApiEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref Application
+      EnvironmentName: !Sub '${ProjectName}-${EnvName}-api'
+      SolutionStackName: !Ref SolutionStackName
+      OptionSettings:
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: EnvironmentType, Value: SingleInstance }
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: ServiceRole, Value: !GetAtt EbServiceRole.Arn }
+        - Namespace: 'aws:ec2:vpc'
+          OptionName: VPCId
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-VpcId' }
+        - Namespace: 'aws:ec2:vpc'
+          OptionName: Subnets
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-PublicSubnetId' }
+        - { Namespace: 'aws:ec2:vpc', OptionName: AssociatePublicIpAddress, Value: 'true' }
+        - { Namespace: 'aws:ec2:instances', OptionName: InstanceTypes, Value: !Ref ApiInstanceType }
+        - { Namespace: 'aws:autoscaling:launchconfiguration', OptionName: IamInstanceProfile, Value: !Ref InstanceProfile }
+        - Namespace: 'aws:autoscaling:launchconfiguration'
+          OptionName: SecurityGroups
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-AppSecurityGroupId' }
+        # Environment variables read by src/config.js
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: PORT, Value: '8080' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: APP_ROLE, Value: api }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: AWS_REGION, Value: !Ref 'AWS::Region' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: QUEUE_NAME, Value: code-jobs }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DYNAMODB_TABLE
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-TableName' }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: RABBITMQ_ENDPOINT
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-MqEndpoint' }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: RABBITMQ_USER
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-MqUsername' }
+        # A SECRET: Beanstalk reads it from Secrets Manager and exposes it as an env variable
+        - Namespace: 'aws:elasticbeanstalk:application:environmentsecrets'
+          OptionName: RABBITMQ_PASSWORD
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-MqPasswordSecretArn' }
+
+  # ---------- Worker environment (APP_ROLE=worker) ----------
+  WorkerEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref Application
+      EnvironmentName: !Sub '${ProjectName}-${EnvName}-worker'
+      SolutionStackName: !Ref SolutionStackName
+      OptionSettings:
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: EnvironmentType, Value: SingleInstance }
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: ServiceRole, Value: !GetAtt EbServiceRole.Arn }
+        - Namespace: 'aws:ec2:vpc'
+          OptionName: VPCId
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-VpcId' }
+        - Namespace: 'aws:ec2:vpc'
+          OptionName: Subnets
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-PublicSubnetId' }
+        - { Namespace: 'aws:ec2:vpc', OptionName: AssociatePublicIpAddress, Value: 'true' }
+        - { Namespace: 'aws:ec2:instances', OptionName: InstanceTypes, Value: !Ref WorkerInstanceType }
+        - { Namespace: 'aws:autoscaling:launchconfiguration', OptionName: IamInstanceProfile, Value: !Ref InstanceProfile }
+        - Namespace: 'aws:autoscaling:launchconfiguration'
+          OptionName: SecurityGroups
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-AppSecurityGroupId' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: PORT, Value: '8080' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: APP_ROLE, Value: worker }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: AWS_REGION, Value: !Ref 'AWS::Region' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: QUEUE_NAME, Value: code-jobs }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DYNAMODB_TABLE
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-TableName' }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: RABBITMQ_ENDPOINT
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-MqEndpoint' }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: RABBITMQ_USER
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-MqUsername' }
+        - Namespace: 'aws:elasticbeanstalk:application:environmentsecrets'
+          OptionName: RABBITMQ_PASSWORD
+          Value: !ImportValue { 'Fn::Sub': '${ProjectName}-${EnvName}-MqPasswordSecretArn' }
+
+Outputs:
+  ApiEnvironmentName:
+    Value: !Ref ApiEnvironment
+  WorkerEnvironmentName:
+    Value: !Ref WorkerEnvironment
+  VersionsBucket:                  # bucket NAME, read by the app's deploy workflow
+    Value: !Ref VersionsBucket
+  VersionsBucketArn:               # bucket ARN, imported by the cicd stack
+    Value: !GetAtt VersionsBucket.Arn
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-VersionsBucketArn' }
+  ApiUrl:
+    Value: !Sub 'http://${ApiEnvironment.EndpointURL}'

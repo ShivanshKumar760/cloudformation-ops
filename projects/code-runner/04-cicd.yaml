@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Role that GitHub Actions of the app repo uses to deploy to Beanstalk
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvName:
+    Type: String
+  GitHubRepoSubject:
+    Type: String
+    Description: sub_claim_prefix of the app repo, without the leading "repo:"
+  GitHubBranch:
+    Type: String
+    Default: main
+
+Resources:
+  AppDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvName}-github-app-deploy'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                'token.actions.githubusercontent.com:sub': !Sub 'repo:${GitHubRepoSubject}:ref:refs/heads/${GitHubBranch}'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk
+      Policies:
+        - PolicyName: upload-bundle
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub
+                  - '${BucketArn}/*'
+                  - BucketArn: !ImportValue
+                      Fn::Sub: '${ProjectName}-${EnvName}-VersionsBucketArn'
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: '*'
+
+Outputs:
+  DeployRoleArn:
+    Description: Goes into the app repo's GitHub secret AWS_ROLE_ARN
+    Value: !GetAtt AppDeployRole.Arn

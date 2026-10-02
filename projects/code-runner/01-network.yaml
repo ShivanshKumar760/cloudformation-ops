@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Network - VPC, one public subnet, internet access, app security group
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvName:
+    Type: String
+
+Resources:
+  # The private network (our own address space)
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-vpc' }
+
+  # The door from the VPC to the internet
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-igw' }
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # A slice of the VPC where our server will live
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-public' }
+
+  # Routing: traffic that is not for the VPC goes to the internet gateway
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-public-rt' }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Firewall group attached to our app servers
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: App servers
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-app-sg' }
+
+  # A subnet with NO route to the internet: RabbitMQ lives here
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-private' }
+
+  # Firewall for RabbitMQ: only our app servers may connect, on the AMQPS port
+  MqSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow AMQPS only from the app servers
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5671
+          ToPort: 5671
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-mq-sg' }
+
+# Outputs with Export can be read by other stacks using !ImportValue
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-VpcId' }
+  PublicSubnetId:
+    Value: !Ref PublicSubnet
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-PublicSubnetId' }
+  AppSecurityGroupId:
+    Value: !Ref AppSecurityGroup
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-AppSecurityGroupId' }
+  PrivateSubnetId:
+    Value: !Ref PrivateSubnet
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-PrivateSubnetId' }
+  MqSecurityGroupId:
+    Value: !Ref MqSecurityGroup
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-MqSecurityGroupId' }
